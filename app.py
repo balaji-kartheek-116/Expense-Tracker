@@ -95,7 +95,7 @@ def get_transactions(start_date=None, end_date=None, categories=None, transactio
     if end_date:
         query += " AND date <= ?"
         params.append(end_date)
-    if categories:
+    if categories and len(categories) > 0:  # Fixed: Check if categories list is not empty
         query += " AND category IN ({})".format(','.join(['?']*len(categories)))
         params.extend(categories)
     if transaction_type:
@@ -108,57 +108,66 @@ def get_transactions(start_date=None, end_date=None, categories=None, transactio
     conn.close()
     return df
 
-def get_balance():
-    conn = sqlite3.connect(get_db_path())
-    income = pd.read_sql_query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'income'", conn).iloc[0,0]
-    expenses = pd.read_sql_query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense'", conn).iloc[0,0]
-    conn.close()
-    return income - expenses
+# ... [Rest of your helper functions remain the same] ...
 
-def get_monthly_summary():
-    conn = sqlite3.connect(get_db_path())
-    query = """
-    SELECT 
-        strftime('%Y-%m', date) as month,
-        SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as income,
-        SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as expense,
-        SUM(CASE WHEN type = 'income' THEN amount ELSE -amount END) as balance
-    FROM transactions
-    GROUP BY strftime('%Y-%m', date)
-    ORDER BY month DESC
-    """
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
-
-# Streamlit App
-st.set_page_config(page_title="Expense Tracker", layout="wide", page_icon="💰")
-
-st.title("💰 Personal Expense Tracker")
-
-# Sidebar for navigation
-menu = st.sidebar.selectbox("Menu", ["Dashboard", "Add Transaction", "Transaction History", "Category Management", "Reports"])
-
-if menu == "Dashboard":
-    st.header("Financial Overview")
+# Transaction History Section - Fixed Version
+elif menu == "Transaction History":
+    st.header("Transaction History")
     
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Current Balance", f"${get_balance():,.2f}")
-    with col2:
-        st.metric("Total Income", f"${get_transactions(transaction_type='income')['amount'].sum():,.2f}")
-    with col3:
-        st.metric("Total Expenses", f"${get_transactions(transaction_type='expense')['amount'].sum():,.2f}")
+    with st.expander("Filters"):
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Start Date", datetime.now() - timedelta(days=30))
+        with col2:
+            end_date = st.date_input("End Date", datetime.now())
+        
+        transaction_type_filter = st.selectbox("Transaction Type", ["All", "income", "expense"])
+        
+        all_categories = get_categories('income') + get_categories('expense')
+        selected_categories = st.multiselect("Categories", all_categories)
     
-    # Monthly summary chart
-    st.subheader("Monthly Summary")
-    monthly_df = get_monthly_summary()
-    if not monthly_df.empty:
-        fig = px.bar(monthly_df, x='month', y=['income', 'expense'], 
-                     barmode='group', title="Income vs Expenses by Month")
-        st.plotly_chart(fig, use_container_width=True)
+    # Apply filters safely
+    filters = {}
+    if start_date:
+        filters['start_date'] = start_date
+    if end_date:
+        filters['end_date'] = end_date
+    if transaction_type_filter != "All":
+        filters['transaction_type'] = transaction_type_filter
+    if selected_categories:  # Only add if categories are selected
+        filters['categories'] = selected_categories
+    
+    transactions = get_transactions(**filters)
+    
+    if not transactions.empty:
+        st.dataframe(transactions.drop(columns=['id']), hide_index=True, use_container_width=True)
+        
+        # Fixed download buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Download as CSV"):
+                csv = transactions.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Click to download",
+                    data=csv,
+                    file_name="transactions.csv",
+                    mime="text/csv",
+                    key='csv-download'
+                )
+        with col2:
+            if st.button("Download as Excel"):
+                excel_buffer = io.BytesIO()
+                with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                    transactions.to_excel(writer, index=False)
+                st.download_button(
+                    label="Click to download",
+                    data=excel_buffer.getvalue(),
+                    file_name="transactions.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key='excel-download'
+                )
     else:
-        st.info("No transactions yet. Add some to see your financial trends!")
+        st.info("No transactions found with the selected filters.")
     
     # Recent transactions
     st.subheader("Recent Transactions")
