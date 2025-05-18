@@ -4,11 +4,16 @@ import plotly.express as px
 from datetime import datetime, timedelta
 import calendar
 import sqlite3
-from pathlib import Path
+import os
+import io
 
-# Initialize database
+# Database setup
+def get_db_path():
+    return os.path.join(os.getcwd(), "expense_tracker.db")
+
 def init_db():
-    conn = sqlite3.connect('expense_tracker.db')
+    db_path = get_db_path()
+    conn = sqlite3.connect(db_path)
     c = conn.cursor()
     
     # Create tables if they don't exist
@@ -45,11 +50,14 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db()
+# Initialize database on startup
+if 'db_initialized' not in st.session_state:
+    init_db()
+    st.session_state.db_initialized = True
 
 # Helper functions
 def get_categories(transaction_type):
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("SELECT name FROM categories WHERE type = ? ORDER BY name", (transaction_type,))
     categories = [row[0] for row in c.fetchall()]
@@ -57,18 +65,19 @@ def get_categories(transaction_type):
     return categories
 
 def add_category(name, transaction_type):
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     try:
         c.execute("INSERT INTO categories (name, type) VALUES (?, ?)", (name, transaction_type))
         conn.commit()
+        return True
     except sqlite3.IntegrityError:
-        st.warning("Category already exists!")
+        return False
     finally:
         conn.close()
 
 def add_transaction(transaction_type, amount, category, date, description):
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     c = conn.cursor()
     c.execute("INSERT INTO transactions (type, amount, category, date, description) VALUES (?, ?, ?, ?, ?)",
               (transaction_type, amount, category, date, description))
@@ -76,7 +85,7 @@ def add_transaction(transaction_type, amount, category, date, description):
     conn.close()
 
 def get_transactions(start_date=None, end_date=None, categories=None, transaction_type=None):
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     query = "SELECT * FROM transactions WHERE 1=1"
     params = []
     
@@ -100,14 +109,14 @@ def get_transactions(start_date=None, end_date=None, categories=None, transactio
     return df
 
 def get_balance():
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     income = pd.read_sql_query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'income'", conn).iloc[0,0]
     expenses = pd.read_sql_query("SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE type = 'expense'", conn).iloc[0,0]
     conn.close()
     return income - expenses
 
 def get_monthly_summary():
-    conn = sqlite3.connect('expense_tracker.db')
+    conn = sqlite3.connect(get_db_path())
     query = """
     SELECT 
         strftime('%Y-%m', date) as month,
@@ -135,11 +144,11 @@ if menu == "Dashboard":
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Current Balance", f"₹{get_balance():,.2f}")
+        st.metric("Current Balance", f"${get_balance():,.2f}")
     with col2:
-        st.metric("Total Income", f"₹{get_transactions(transaction_type='income')['amount'].sum():,.2f}")
+        st.metric("Total Income", f"${get_transactions(transaction_type='income')['amount'].sum():,.2f}")
     with col3:
-        st.metric("Total Expenses", f"₹{get_transactions(transaction_type='expense')['amount'].sum():,.2f}")
+        st.metric("Total Expenses", f"${get_transactions(transaction_type='expense')['amount'].sum():,.2f}")
     
     # Monthly summary chart
     st.subheader("Monthly Summary")
@@ -160,11 +169,17 @@ elif menu == "Add Transaction":
     st.header("Add New Transaction")
     
     with st.form("transaction_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            transaction_type = st.radio("Transaction Type", ["expense", "income"], horizontal=True)
-        with col2:
-            amount = st.number_input("Amount", min_value=0.01, step=0.01, format="%.2f")
+        transaction_type = st.radio("Transaction Type", ["expense", "income"], horizontal=True)
+        
+        # Use session state to track transaction type changes
+        if 'prev_transaction_type' not in st.session_state:
+            st.session_state.prev_transaction_type = transaction_type
+        
+        if st.session_state.prev_transaction_type != transaction_type:
+            st.session_state.prev_transaction_type = transaction_type
+            st.experimental_rerun()
+        
+        amount = st.number_input("Amount", min_value=0.01, step=0.01, format="%.2f")
         
         categories = get_categories(transaction_type)
         col1, col2 = st.columns(2)
@@ -173,9 +188,11 @@ elif menu == "Add Transaction":
         with col2:
             new_category = st.text_input("Or add new category")
             if new_category:
-                add_category(new_category, transaction_type)
-                st.success(f"Category '{new_category}' added!")
-                st.experimental_rerun()
+                if add_category(new_category, transaction_type):
+                    st.success(f"Category '{new_category}' added!")
+                    st.experimental_rerun()
+                else:
+                    st.warning("Category already exists!")
         
         date = st.date_input("Date", datetime.now())
         description = st.text_input("Description (optional)")
@@ -215,21 +232,27 @@ elif menu == "Transaction History":
     if not transactions.empty:
         st.dataframe(transactions.drop(columns=['id']), hide_index=True, use_container_width=True)
         
-        # Export options
+        # Export options - Fixed download buttons
         col1, col2 = st.columns(2)
         with col1:
+            csv = transactions.to_csv(index=False).encode('utf-8')
             st.download_button(
                 "Download as CSV",
-                transactions.to_csv(index=False),
+                csv,
                 "transactions.csv",
-                "text/csv"
+                "text/csv",
+                key='download-csv'
             )
         with col2:
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                transactions.to_excel(writer, index=False)
             st.download_button(
                 "Download as Excel",
-                transactions.to_excel(excel_writer="transactions.xlsx", index=False),
+                excel_buffer.getvalue(),
                 "transactions.xlsx",
-                "application/vnd.ms-excel"
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key='download-excel'
             )
     else:
         st.info("No transactions found with the selected filters.")
@@ -248,9 +271,11 @@ elif menu == "Category Management":
             new_category = st.text_input("Add New Expense Category")
             submitted = st.form_submit_button("Add")
             if submitted and new_category:
-                add_category(new_category, 'expense')
-                st.success(f"Category '{new_category}' added!")
-                st.experimental_rerun()
+                if add_category(new_category, 'expense'):
+                    st.success(f"Category '{new_category}' added!")
+                    st.experimental_rerun()
+                else:
+                    st.warning("Category already exists!")
     
     with tab2:
         st.subheader("Income Categories")
@@ -261,9 +286,11 @@ elif menu == "Category Management":
             new_category = st.text_input("Add New Income Category")
             submitted = st.form_submit_button("Add")
             if submitted and new_category:
-                add_category(new_category, 'income')
-                st.success(f"Category '{new_category}' added!")
-                st.experimental_rerun()
+                if add_category(new_category, 'income'):
+                    st.success(f"Category '{new_category}' added!")
+                    st.experimental_rerun()
+                else:
+                    st.warning("Category already exists!")
 
 elif menu == "Reports":
     st.header("Financial Reports")
@@ -286,8 +313,10 @@ elif menu == "Reports":
         expenses = get_transactions(start_date=start_date, transaction_type='expense')
         
         if not expenses.empty:
-            fig = px.pie(expenses, names='category', values='amount', 
-                         title=f"Expense Distribution {f'since {start_date.strftime("%Y-%m-%d")}' if start_date else ''}")
+            # Fixed pie chart
+            category_totals = expenses.groupby('category')['amount'].sum().reset_index()
+            fig = px.pie(category_totals, names='category', values='amount', 
+                         title=f"Expense Distribution {f'since {start_date.strftime('%Y-%m-%d')}' if start_date else ''}")
             st.plotly_chart(fig, use_container_width=True)
             
             # Top expenses
@@ -302,7 +331,11 @@ elif menu == "Reports":
         
         monthly_summary = get_monthly_summary()
         if not monthly_summary.empty:
-            fig = px.line(monthly_summary, x='month', y=['income', 'expense', 'balance'], 
+            # Fixed line chart
+            fig = px.line(monthly_summary.melt(id_vars=['month'], 
+                                              value_vars=['income', 'expense', 'balance'], 
+                                              var_name='Type', value_name='Amount'), 
+                          x='month', y='Amount', color='Type',
                           title="Monthly Financial Trends")
             st.plotly_chart(fig, use_container_width=True)
             
@@ -322,18 +355,27 @@ elif menu == "Reports":
         )
         
         if not yearly_data.empty:
-            # Yearly summary
+            # Yearly summary - Fixed bar chart
             yearly_summary = yearly_data.groupby('type')['amount'].sum().reset_index()
             fig = px.bar(yearly_summary, x='type', y='amount', 
-                         title=f"Year {year} Summary")
+                         title=f"Year {year} Summary",
+                         labels={'type': 'Transaction Type', 'amount': 'Amount'})
             st.plotly_chart(fig, use_container_width=True)
             
-            # Monthly breakdown
+            # Monthly breakdown - Fixed bar chart
             yearly_data['month'] = pd.to_datetime(yearly_data['date']).dt.month
             monthly_breakdown = yearly_data.groupby(['month', 'type'])['amount'].sum().unstack().fillna(0)
             monthly_breakdown.index = monthly_breakdown.index.map(lambda x: calendar.month_abbr[x])
-            fig = px.bar(monthly_breakdown, x=monthly_breakdown.index, y=['income', 'expense'], 
-                         barmode='group', title=f"Monthly Breakdown for {year}")
+            
+            # Properly format the data for Plotly
+            monthly_breakdown = monthly_breakdown.reset_index().melt(id_vars=['month'], 
+                                                                   value_vars=['income', 'expense'],
+                                                                   var_name='type', 
+                                                                   value_name='amount')
+            
+            fig = px.bar(monthly_breakdown, x='month', y='amount', color='type',
+                         barmode='group', title=f"Monthly Breakdown for {year}",
+                         labels={'month': 'Month', 'amount': 'Amount', 'type': 'Transaction Type'})
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info(f"No data available for year {year}.")
