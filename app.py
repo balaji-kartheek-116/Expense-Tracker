@@ -135,11 +135,11 @@ if menu == "Dashboard":
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("Current Balance", f"${get_balance():,.2f}")
+        st.metric("Current Balance", f"₹{get_balance():,.2f}")
     with col2:
-        st.metric("Total Income", f"${get_transactions(transaction_type='income')['amount'].sum():,.2f}")
+        st.metric("Total Income", f"₹{get_transactions(transaction_type='income')['amount'].sum():,.2f}")
     with col3:
-        st.metric("Total Expenses", f"${get_transactions(transaction_type='expense')['amount'].sum():,.2f}")
+        st.metric("Total Expenses", f"₹{get_transactions(transaction_type='expense')['amount'].sum():,.2f}")
     
     # Monthly summary chart
     st.subheader("Monthly Summary")
